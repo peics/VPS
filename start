@@ -60,19 +60,18 @@ network_fix() {
     network_check
     echo -e "${C_YELLOW}[开始] 正在执行自动修复策略...${C_RESET}"
     
-    # 备份并重写 DNS 为公共 DNS 解决解析问题
     cp /etc/resolv.conf /etc/resolv.conf.bak
     cat > /etc/resolv.conf <<EOF
 nameserver 8.8.8.8
 nameserver 1.1.1.1
 nameserver 2001:4860:4860::8888
 EOF
-    # 清理防火墙可能的拦截 (放行所有)
+    
     iptables -P INPUT ACCEPT
     iptables -P FORWARD ACCEPT
     iptables -P OUTPUT ACCEPT
     
-    echo -e "${C_GREEN}[完成] DNS 已重置为 Google/Cloudflare 公共 DNS，防火墙默认规则已放行。${C_RESET}"
+    echo -e "${C_GREEN}[完成] DNS 已重置为公共 DNS，防火墙规则已放行。${C_RESET}"
     echo -e "${C_CYAN}---------- 修复后网络状态 ----------${C_RESET}"
     network_check
 }
@@ -107,20 +106,17 @@ disable_ipv6() {
     echo -e "${C_GREEN}[完成] IPv6 已关闭！${C_RESET}"
 }
 
-# 6. TCP 通用调优 (开启 BBR)
+# 6. TCP 通用调优
 tcp_tune() {
     echo -e "${C_YELLOW}[开始] 正在进行 TCP 网络调优 (BBR加速)...${C_RESET}"
-    # 移除旧的 BBR 配置
     sed -i '/net.core.default_qdisc/d' /etc/sysctl.conf
     sed -i '/net.ipv4.tcp_congestion_control/d' /etc/sysctl.conf
     
-    # 写入新的 BBR 配置
     echo "net.core.default_qdisc = fq" >> /etc/sysctl.conf
     echo "net.ipv4.tcp_congestion_control = bbr" >> /etc/sysctl.conf
     
     sysctl -p &>/dev/null
     
-    # 检查是否生效
     bbr_status=$(lsmod | grep bbr)
     if [ -n "$bbr_status" ]; then
         echo -e "${C_GREEN}[完成] BBR 拥塞控制已成功开启！${C_RESET}"
@@ -141,7 +137,10 @@ set_timezone() {
 # ================= 菜单系统 =================
 
 show_menu() {
+    # 强制重置终端所有颜色和属性，然后再清屏
+    echo -ne "\033[0m"
     clear
+    
     echo -e "${C_CYAN}=========================================================${C_RESET}"
     echo -e "                   ${C_GREEN}VPS 配置脚本${C_RESET}                   "
     echo -e "${C_CYAN}=========================================================${C_RESET}"
@@ -154,12 +153,19 @@ show_menu() {
     echo -e "${C_YELLOW}  7.${C_RESET} 设置系统时区为中国 (Asia/Shanghai)"
     echo -e "${C_RED}  0.${C_RESET} 退出脚本"
     echo -e "${C_CYAN}=========================================================${C_RESET}"
+    
+    # 将提示文字和输入剥离开来，防止颜色溢出到终端输入流
+    echo -ne "请输入对应数字并按回车: "
 }
 
 while true; do
     show_menu
-    read -p "请输入对应数字并按回车: " choice
-    echo ""
+    read choice
+    echo "" # 换行
+    
+    # 执行前强制重置一下颜色
+    echo -ne "\033[0m"
+    
     case $choice in
         1) update_env ;;
         2) network_check ;;
@@ -177,7 +183,8 @@ while true; do
             ;;
     esac
     
-    # 每次执行完任意选项后，暂停让用户看结果
     echo ""
-    read -n 1 -s -r -p "按任意键返回主菜单..."
+    # 同样拆分提示和输入
+    echo -ne "按回车键返回主菜单..."
+    read -r
 done
