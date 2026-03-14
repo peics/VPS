@@ -204,7 +204,7 @@ show_menu() {
     echo -e "${C_YELLOW} 11.${C_WHITE} Iperf3 安装${C_RESET}"
     echo -e "${C_YELLOW} 12.${C_WHITE} Iperf3 运行${C_RESET}"
     echo -e "${C_YELLOW} 13.${C_WHITE} 停用 Iperf3${C_RESET}"
-    echo -e "${C_RED}  0.${C_WHITE} 退出脚本并清空痕迹${C_RESET}"
+    echo -e "${C_RED}  0.${C_WHITE} 退出脚本${C_RESET}"
     echo -e "${C_CYAN}=========================================================${C_RESET}"
     
     echo -ne "${C_WHITE}请输入对应数字并按回车: ${C_RESET}"
