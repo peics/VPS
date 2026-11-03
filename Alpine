@@ -1,0 +1,187 @@
+#!/usr/bin/env bash
+# Alpine 3.23 / OpenRC / amd64 and arm64. No remote scripts executed.
+set -Eeuo pipefail
+umask 077
+TARGET=apple.com
+VERSION=1.14.4
+BASE=/etc/proxy-node
+BIN=/usr/local/libexec/proxy-node/sing-box
+SERVICE=/etc/init.d/proxy-node
+fail(){ printf '错误：%s\n' "$*" >&2; exit 1; }
+[[ $(id -u) == 0 ]] || fail '请使用 root 运行'
+[[ -f /etc/alpine-release ]] || fail '仅支持 Alpine Linux'
+[[ $(cut -d. -f1,2 /etc/alpine-release) == 3.23 ]] || fail '此版本仅支持 Alpine 3.23'
+command -v rc-service >/dev/null || fail '需要 OpenRC'
+[[ ! -e $BASE && ! -e $SERVICE && ! -e ${BIN%/*} ]] || fail '已有 proxy-node 安装，拒绝覆盖凭据；请先备份并卸载'
+case $(uname -m) in
+  x86_64) ARCH=amd64; SHA=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968;;
+  aarch64) ARCH=arm64; SHA=436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26;;
+  *) fail '仅支持 x86_64 和 aarch64';;
+esac
+apk add --no-cache bash wget ca-certificates tar openssl iproute2 python3
+command -v supervise-daemon >/dev/null || fail 'OpenRC 缺少 supervise-daemon'
+
+# This checks locally assigned addresses and routes, NOT public inbound access.
+HAS4=0; HAS6=0
+if ip -4 addr show scope global | grep -q 'inet ' && ip -4 route get 1.1.1.1 >/dev/null 2>&1; then HAS4=1; fi
+if ip -6 addr show scope global | grep -q 'inet6 ' && ip -6 route get 2606:4700:4700::1111 >/dev/null 2>&1; then HAS6=1; fi
+[[ $HAS4$HAS6 != 00 ]] || fail '未检测到具有全局地址和路由的 IPv4/IPv6'
+printf '本地地址与路由检测：IPv4=%s IPv6=%s（不代表公网端口可达）\n' "$HAS4" "$HAS6"
+ask_domain(){
+  local family=$1 value
+  while :; do
+    read -r -p "请输入 IPv${family} 节点域名（留空跳过该地址族）：" value
+    if [[ -z $value ]]; then REPLY=; return; fi
+    if python3 - "$family" "$value" <<'PY'
+import sys,socket,re,ipaddress
+f,h=sys.argv[1:]; af=socket.AF_INET if f=='4' else socket.AF_INET6
+try:
+    if len(h)>253 or not all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?',s) for s in h.split('.')):
+        raise ValueError('请输入纯域名，不含协议、端口、路径')
+    addresses={r[4][0] for r in socket.getaddrinfo(h,None,af)}
+    if not addresses or not any(ipaddress.ip_address(a).is_global for a in addresses):
+        raise ValueError('未解析到相应地址族的公网地址')
+    print('DNS 解析：'+', '.join(sorted(addresses)))
+except Exception as e: print('校验失败：',e); sys.exit(1)
+PY
+    then REPLY=$value; return; fi
+  done
+}
+V4_DOMAIN=; V6_DOMAIN=
+if [[ $HAS4 == 1 ]]; then ask_domain 4; V4_DOMAIN=$REPLY; fi
+if [[ $HAS6 == 1 ]]; then ask_domain 6; V6_DOMAIN=$REPLY; fi
+[[ -n $V4_DOMAIN$V6_DOMAIN ]] || fail '至少填写一个节点域名'
+port(){
+  local prompt=$1 default=$2 value
+  while :; do
+    read -r -p "$prompt [$default]：" value; value=${value:-$default}
+    if [[ $value =~ ^[1-9][0-9]{3,4}$ ]] && ((value>=1024 && value<=65535)); then REPLY=$value; return; fi
+    echo '端口必须为 1024-65535，不接受前导零'
+  done
+}
+port 'VLESS TCP 监听端口' 31313; VPORT=$REPLY
+port 'HY2 UDP 监听端口' 31314; HPORT=$REPLY
+[[ $VPORT != $HPORT ]] || fail '按本脚本约定，请使用两个不同端口'
+[[ -z $(ss -H -ltn "sport = :$VPORT") ]] || fail "TCP $VPORT 已占用"
+[[ -z $(ss -H -lun "sport = :$HPORT") ]] || fail "UDP $HPORT 已占用"
+printf '安装计划：VLESS TCP/%s，HY2 UDP/%s，REALITY %s:443\n' "$VPORT" "$HPORT" "$TARGET"
+echo '将安装独立 proxy-node 服务；不修改 SSH、防火墙、内核参数或已有节点。'
+echo '上方端口须是虚拟机本地端口；若有 NAT 转发，公网与本地端口须相同。'
+read -r -p '确认安装？[y/N]：' answer
+[[ $answer == y || $answer == Y ]] || exit 0
+TMP=$(mktemp -d); OWNED=0; COMMITTED=0
+cleanup(){
+  local result=$?
+  if [[ $OWNED == 1 && $COMMITTED == 0 ]]; then
+    rc-service proxy-node stop >/dev/null 2>&1 || true
+    rc-update del proxy-node default >/dev/null 2>&1 || true
+    rm -rf "$BASE" "${BIN%/*}" "$SERVICE"
+    echo '安装失败：已移除本脚本新增配置、核心和服务；apk 依赖保留。' >&2
+  fi
+  rm -rf "$TMP"
+  return "$result"
+}
+trap cleanup EXIT
+ASSET=sing-box-$VERSION-linux-$ARCH.tar.gz
+wget -T 60 -O "$TMP/core.tgz" "https://github.com/SagerNet/sing-box/releases/download/v$VERSION/$ASSET"
+printf '%s  %s\n' "$SHA" "$TMP/core.tgz" | sha256sum -c -
+tar -xzf "$TMP/core.tgz" -C "$TMP"
+OWNED=1
+mkdir -p "$BASE" "${BIN%/*}"
+chmod 700 "$BASE"
+cp "$TMP/sing-box-$VERSION-linux-$ARCH/sing-box" "$BIN"
+chmod 755 "$BIN"
+UUID=$("$BIN" generate uuid)
+KEYS=$("$BIN" generate reality-keypair)
+PRIVATE_KEY=$(printf '%s\n' "$KEYS" | awk '/PrivateKey/{print $2}')
+PUBLIC_KEY=$(printf '%s\n' "$KEYS" | awk '/PublicKey/{print $2}')
+[[ -n $PRIVATE_KEY && -n $PUBLIC_KEY ]] || fail 'REALITY 密钥生成失败'
+SHORT_ID=$(openssl rand -hex 8)
+HY_PASS=$(openssl rand -hex 24)
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+  -keyout "$BASE/hy2.key" -out "$BASE/hy2.crt" \
+  -subj /CN=hy2.internal -addext subjectAltName=DNS:hy2.internal >/dev/null 2>&1
+HY_FP=$(openssl x509 -in "$BASE/hy2.crt" -outform DER | sha256sum | awk '{print $1}')
+export BASE TARGET V4_DOMAIN V6_DOMAIN VPORT HPORT UUID PRIVATE_KEY PUBLIC_KEY SHORT_ID HY_PASS HY_FP
+
+# BEGIN CONFIG GENERATOR
+python3 - <<'PY'
+import os,json,pathlib,urllib.parse
+e=os.environ; base=pathlib.Path(e['BASE']); v4=e['V4_DOMAIN']; v6=e['V6_DOMAIN']
+# A single dual-stack socket if supported; otherwise separate v4/v6 sockets.
+listeners=[]
+if v6:
+    listeners.append('::')
+    only6=pathlib.Path('/proc/sys/net/ipv6/bindv6only').read_text().strip()=='1'
+    if v4 and only6: listeners.append('0.0.0.0')
+else: listeners.append('0.0.0.0')
+inbounds=[]
+for i,listen in enumerate(listeners):
+    inbounds += [
+      dict(type='vless',tag=f'vless-{i}',listen=listen,listen_port=int(e['VPORT']),
+           users=[dict(uuid=e['UUID'],flow='xtls-rprx-vision')],tls=dict(enabled=True,
+           server_name=e['TARGET'],reality=dict(enabled=True,handshake=dict(server=e['TARGET'],server_port=443),
+           private_key=e['PRIVATE_KEY'],short_id=[e['SHORT_ID']]))),
+      dict(type='hysteria2',tag=f'hy2-{i}',listen=listen,listen_port=int(e['HPORT']),
+           users=[dict(password=e['HY_PASS'])],tls=dict(enabled=True,
+           certificate_path=str(base/'hy2.crt'),key_path=str(base/'hy2.key')))]
+server=dict(log=dict(level='warn'),inbounds=inbounds,outbounds=[dict(type='direct',tag='direct')],
+            route=dict(final='direct',rules=[dict(ip_is_private=True,action='reject')]))
+(base/'config.json').write_text(json.dumps(server,indent=2)+'\n')
+nodes=[]; links=[]
+for family,domain in [('IPv4',v4),('IPv6',v6)]:
+    if not domain: continue
+    name='VLESS-'+family; hname='HY2-'+family
+    nodes.append(dict(name=name,type='vless',server=domain,port=int(e['VPORT']),uuid=e['UUID'],
+      network='tcp',tls=True,udp=True,flow='xtls-rprx-vision',servername=e['TARGET'],
+      **{'client-fingerprint':'chrome','reality-opts':{'public-key':e['PUBLIC_KEY'],'short-id':e['SHORT_ID']}}))
+    nodes.append(dict(name=hname,type='hysteria2',server=domain,port=int(e['HPORT']),password=e['HY_PASS'],
+      sni='hy2.internal',fingerprint=e['HY_FP'],**{'skip-cert-verify':True}))
+    query=urllib.parse.urlencode(dict(encryption='none',security='reality',sni=e['TARGET'],fp='chrome',
+          pbk=e['PUBLIC_KEY'],sid=e['SHORT_ID'],type='tcp',flow='xtls-rprx-vision'))
+    links.append(f"vless://{e['UUID']}@{domain}:{e['VPORT']}?{query}#{name}")
+    query=urllib.parse.urlencode(dict(sni='hy2.internal',insecure='0',pinSHA256=e['HY_FP']))
+    links.append(f"hysteria2://{e['HY_PASS']}@{domain}:{e['HPORT']}?{query}#{hname}")
+# JSON is valid YAML 1.2; Mihomo reads this file as a complete profile.
+profile={'mixed-port':7890,'allow-lan':False,'mode':'rule','log-level':'warning','ipv6':bool(v6),
+ 'proxies':nodes,'proxy-groups':[{'name':'PROXY','type':'select','proxies':[n['name'] for n in nodes]}],
+ 'rules':['MATCH,PROXY']}
+(base/'mihomo.yaml').write_text(json.dumps(profile,indent=2)+'\n')
+(base/'links.txt').write_text('\n'.join(links)+'\n')
+(base/'client-info.txt').write_text('REALITY: '+e['TARGET']+':443\nHY2 SNI: hy2.internal\nHY2 SHA256: '+e['HY_FP']+
+ '\n链接导入后须确认 HY2 指纹仍存在；若客户端丢弃 pinSHA256，禁止仅开启跳过验证。\n'+
+ 'Nikki/FlClash 使用 mihomo.yaml；v2rayN 导入链接后必须核实 HY2 证书指纹，未保留指纹则不要连接。\n')
+PY
+# END CONFIG GENERATOR
+
+"$BIN" check -c "$BASE/config.json"
+
+cat > "$SERVICE" <<'RC'
+#!/sbin/openrc-run
+name="proxy-node"
+description="VLESS REALITY Vision and Hysteria2"
+supervisor="supervise-daemon"
+command="/usr/local/libexec/proxy-node/sing-box"
+command_args="run -c /etc/proxy-node/config.json"
+pidfile="/run/proxy-node.pid"
+respawn_delay=5
+respawn_max=0
+output_log="/dev/null"
+error_log="/dev/null"
+depend() { need net; }
+start_pre() { "$command" check -c /etc/proxy-node/config.json; }
+RC
+chmod 755 "$SERVICE"
+chmod 600 "$BASE"/*
+rc-update add proxy-node default
+rc-service proxy-node start
+sleep 2
+rc-service proxy-node status || fail '服务未正常启动'
+[[ -n $(ss -H -ltn "sport = :$VPORT") ]] || fail 'VLESS 没有监听'
+[[ -n $(ss -H -lun "sport = :$HPORT") ]] || fail 'HY2 没有监听'
+COMMITTED=1
+echo "完成。客户端文件保存在 $BASE（含密钥，切勿上传 GitHub）。"
+echo "Nikki/FlClash：$BASE/mihomo.yaml；分享链接：$BASE/links.txt"
+echo "请放行 TCP $VPORT、UDP $HPORT，并核实公网端口映射和 IPv4/IPv6 入站。"
+echo '此脚本只检测本地地址、路由、DNS 和监听，不测速、不测试 REALITY 目标。'
+echo '查看状态：rc-service proxy-node status；重启：rc-service proxy-node restart'
