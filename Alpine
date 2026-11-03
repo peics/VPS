@@ -14,8 +14,8 @@ fail(){ printf '错误：%s\n' "$*" >&2; exit 1; }
 command -v rc-service >/dev/null || fail '需要 OpenRC'
 [[ ! -e $BASE && ! -e $SERVICE && ! -e ${BIN%/*} ]] || fail '已有 proxy-node 安装，拒绝覆盖凭据；请先备份并卸载'
 case $(uname -m) in
-  x86_64) ARCH=amd64; SHA=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968;;
-  aarch64) ARCH=arm64; SHA=436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26;;
+  x86_64) ARCH=amd64-musl; SHA=8f7c5f0651238850d96a0e488e5473cd77ec1a0098f63942e943f475a12057ca;;
+  aarch64) ARCH=arm64-musl; SHA=b95e25f921dc5e17a4cf13327243d1177642c7e35425bf5372862c477c359f56;;
   *) fail '仅支持 x86_64 和 aarch64';;
 esac
 apk add --no-cache bash wget ca-certificates tar openssl iproute2 python3
@@ -67,8 +67,6 @@ port 'HY2 UDP 监听端口' 31314; HPORT=$REPLY
 printf '安装计划：VLESS TCP/%s，HY2 UDP/%s，REALITY %s:443\n' "$VPORT" "$HPORT" "$TARGET"
 echo '将安装独立 proxy-node 服务；不修改 SSH、防火墙、内核参数或已有节点。'
 echo '上方端口须是虚拟机本地端口；若有 NAT 转发，公网与本地端口须相同。'
-read -r -p '确认安装？[y/N]：' answer
-[[ $answer == y || $answer == Y ]] || exit 0
 TMP=$(mktemp -d); OWNED=0; COMMITTED=0
 cleanup(){
   local result=$?
