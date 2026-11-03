@@ -178,8 +178,9 @@ rc-service proxy-node status || fail '服务未正常启动'
 [[ -n $(ss -H -ltn "sport = :$VPORT") ]] || fail 'VLESS 没有监听'
 [[ -n $(ss -H -lun "sport = :$HPORT") ]] || fail 'HY2 没有监听'
 COMMITTED=1
-echo "完成。客户端文件保存在 $BASE（含密钥，切勿上传 GitHub）。"
-echo "Nikki/FlClash：$BASE/mihomo.yaml；分享链接：$BASE/links.txt"
-echo "请放行 TCP $VPORT、UDP $HPORT，并核实公网端口映射和 IPv4/IPv6 入站。"
-echo '此脚本只检测本地地址、路由、DNS 和监听，不测速、不测试 REALITY 目标。'
-echo '查看状态：rc-service proxy-node status；重启：rc-service proxy-node restart'
+echo
+echo '安装完成，节点链接如下：'
+cat "$BASE/links.txt"
+echo
+echo "配置文件：$BASE/mihomo.yaml"
+echo "请放行 TCP $VPORT、UDP $HPORT。"
